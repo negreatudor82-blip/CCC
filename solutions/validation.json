@@ -1,0 +1,114 @@
+[
+  {
+    "input": "example",
+    "cases": 2,
+    "original_cost": 136,
+    "improved_cost": 136,
+    "case_costs": [
+      72,
+      64
+    ],
+    "output": "out_level-3_0-example.txt"
+  },
+  {
+    "input": "small",
+    "cases": 10,
+    "original_cost": 34038,
+    "improved_cost": 28576,
+    "case_costs": [
+      2504,
+      2956,
+      3788,
+      3596,
+      3636,
+      2418,
+      3146,
+      2152,
+      2440,
+      1940
+    ],
+    "output": "out_level-3_1-small.txt"
+  },
+  {
+    "input": "medium",
+    "cases": 15,
+    "original_cost": 26762,
+    "improved_cost": 22366,
+    "case_costs": [
+      558,
+      1112,
+      1644,
+      1612,
+      1172,
+      856,
+      1732,
+      924,
+      2258,
+      1198,
+      1806,
+      2284,
+      2856,
+      1518,
+      836
+    ],
+    "output": "out_level-3_2-medium.txt"
+  },
+  {
+    "input": "large",
+    "cases": 20,
+    "original_cost": 36529,
+    "improved_cost": 27094,
+    "case_costs": [
+      1559,
+      864,
+      437,
+      951,
+      560,
+      2356,
+      2243,
+      1973,
+      1455,
+      774,
+      2103,
+      1160,
+      642,
+      1857,
+      1882,
+      1279,
+      592,
+      1388,
+      952,
+      2067
+    ],
+    "output": "out_level-3_3-large.txt"
+  },
+  {
+    "input": "enormous",
+    "cases": 20,
+    "original_cost": 40636,
+    "improved_cost": 34421,
+    "case_costs": [
+      2555,
+      2384,
+      1842,
+      1246,
+      2438,
+      2173,
+      983,
+      2341,
+      879,
+      551,
+      1665,
+      879,
+      3270,
+      2422,
+      1632,
+      1078,
+      628,
+      2283,
+      1516,
+      1656
+    ],
+    "output": "out_level-3_4-enormous.txt"
+  }
+]

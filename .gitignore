@@ -1,0 +1,11 @@
+# Local executables and compiler outputs
+/factory
+/factory.exe
+/optimizer/factory
+/optimizer/factory.exe
+*.o
+*.obj
+
+# Python validation caches
+__pycache__/
+*.py[cod]
