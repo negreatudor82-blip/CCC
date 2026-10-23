@@ -191,6 +191,12 @@ static vector<ll> inv;
 static vector<char> inProg, dem;
 static vector<int> seqBuf;
 static const vector<int>* chPtr = nullptr;
+struct ChoiceScope {
+    explicit ChoiceScope(const vector<int>& choices) { chPtr = &choices; }
+    ~ChoiceScope() { chPtr = nullptr; }
+    ChoiceScope(const ChoiceScope&) = delete;
+    ChoiceScope& operator=(const ChoiceScope&) = delete;
+};
 static ll curCost = 0, costBound = LINF, stepCap = 0, stepCnt = 0;
 static bool aborted = false;
 static double trialDeadline = 1e100;
@@ -291,7 +297,7 @@ static bool ensureMol(int m, ll need, bool top) {
 
 // returns total purchase cost, or LINF if invalid / aborted / not cheaper than `bound`
 static ll runTrial(const vector<int>& ch, int target, ll K, ll bound, ll cap) {
-    chPtr = &ch;
+    ChoiceScope choices(ch);
     fill(inv.begin(), inv.end(), 0);
     fill(inProg.begin(), inProg.end(), 0);
     fill(dem.begin(), dem.end(), 0);
@@ -565,9 +571,11 @@ int main(int argc, char** argv) {
             }
         }
     }
-    ll total = 0;
+    // Reserve time to reuse complete valid production batches across targets.
+    // Each candidate is replayed from empty; cases never share inventory.
+    const double individualDeadline = max(nowSec(), totalTime * 0.90);
     for (int i = 0; i < nCases; ++i) {
-        double remaining = totalTime - nowSec();
+        double remaining = individualDeadline - nowSec();
         double share = max(0.2, remaining / (double)(nCases - i));
         plans[i] = solveBetter(cases[i].first, cases[i].second, nowSec() + share, previous[i]);
         if (plans[i].cost >= LINF) {
@@ -575,6 +583,11 @@ int main(int argc, char** argv) {
                  << names[cases[i].second] << ")\n";
             return 2;
         }
+        cerr << "Search case " << i + 1 << "/" << nCases << ": cost " << plans[i].cost << "\n";
+    }
+    improveCaseFamilies(plans, cases, previous, max(nowSec(), totalTime));
+    ll total = 0;
+    for (int i = 0; i < nCases; ++i) {
         ll vc = 0;
         bool ok = verifySeq(plans[i].seq, cases[i].second, cases[i].first, vc);
         if (!ok || vc != plans[i].cost) {

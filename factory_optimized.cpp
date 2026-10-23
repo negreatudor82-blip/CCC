@@ -1,10 +1,10 @@
-// Molecule Factory, Level 3 -- standalone C++17 optimizer.
+// Molecule Factory, Level 3 -- standalone C++17 cost optimizer.
 // Build: g++ -O2 -std=c++17 factory_optimized.cpp -o factory
 // Run: ./factory INPUT [OUTPUT] [SECONDS=60] [SEED=987654321]
-// A matching existing OUTPUT is validated and used as an incumbent.
-// Small networks use exact inventory search; larger networks use heuristics.
-// Every accepted solution is independently replayed from empty inventory.
-// Larger instances report best-found costs, not unproved global optima.
+// A matching existing OUTPUT is validated and retained as an incumbent.
+// Includes inventory search, integer neighborhoods, suffix repair and batch reuse.
+// Every accepted plan is replayed from empty inventory. Large-instance results
+// are best found; optimality is claimed only by completed exact inventory search.
 
 #include <bits/stdc++.h>
 // ---- linear_program.hpp ----
@@ -646,6 +646,12 @@ static vector<ll> inv;
 static vector<char> inProg, dem;
 static vector<int> seqBuf;
 static const vector<int>* chPtr = nullptr;
+struct ChoiceScope {
+    explicit ChoiceScope(const vector<int>& choices) { chPtr = &choices; }
+    ~ChoiceScope() { chPtr = nullptr; }
+    ChoiceScope(const ChoiceScope&) = delete;
+    ChoiceScope& operator=(const ChoiceScope&) = delete;
+};
 static ll curCost = 0, costBound = LINF, stepCap = 0, stepCnt = 0;
 static bool aborted = false;
 static double trialDeadline = 1e100;
@@ -746,7 +752,7 @@ static bool ensureMol(int m, ll need, bool top) {
 
 // returns total purchase cost, or LINF if invalid / aborted / not cheaper than `bound`
 static ll runTrial(const vector<int>& ch, int target, ll K, ll bound, ll cap) {
-    chPtr = &ch;
+    ChoiceScope choices(ch);
     fill(inv.begin(), inv.end(), 0);
     fill(inProg.begin(), inProg.end(), 0);
     fill(dem.begin(), dem.end(), 0);
@@ -1434,6 +1440,402 @@ static void polishSequence(Plan& best, int target, ll K, double deadline) {
 
 #endif  // FACTORY_SEQUENCE_POLISH_HPP
 
+// ---- trajectory_search.hpp ----
+#ifndef FACTORY_TRAJECTORY_SEARCH_HPP
+#define FACTORY_TRAJECTORY_SEARCH_HPP
+
+// Search around an executable incumbent rather than rebuilding every plan from
+// zero. All checkpoints are actual inventories, including purchased seeds.
+namespace factory_trajectory {
+
+struct Event {
+    int position, molecule;
+    bool purchase;
+    double weight;
+};
+
+struct Trace {
+    vector<vector<ll>> stock, required;
+    vector<ll> cost;
+    vector<Event> events;
+    vector<int> policy;
+};
+
+static bool makeTrace(const Plan& plan, int target, ll quantity,
+                      Trace& trace, double deadline) {
+    const int n = (int)plan.seq.size();
+    trace.stock.assign(n + 1, vector<ll>(M));
+    trace.cost.assign(n + 1, 0);
+    trace.required.assign(n + 1, vector<ll>(M));
+    trace.events.clear();
+    vector<unordered_map<int, ll>> contribution(M);
+    vector<ll> bought(M);
+    for (int i = 0; i < n; ++i) {
+        if ((i & 31) == 0 && nowSec() >= deadline) return false;
+        const auto& reaction = R[plan.seq[i]];
+        trace.stock[i + 1] = trace.stock[i];
+        trace.cost[i + 1] = trace.cost[i];
+        auto& stock = trace.stock[i + 1];
+        for (auto [m, q] : reaction.in) {
+            ll missing = max(0LL, q - stock[m]);
+            if (missing && price[m] < 0) return false;
+            if (missing) {
+                __int128 paid = (__int128)missing * price[m];
+                __int128 next = (__int128)trace.cost[i + 1] + paid;
+                if (next >= LINF) return false;
+                trace.cost[i + 1] = (ll)next;
+                bought[m] += missing;
+                trace.events.push_back({i, m, true, (double)paid});
+            }
+            stock[m] = max(0LL, stock[m] - q);
+        }
+        for (auto [m, q] : reaction.out) {
+            if ((__int128)stock[m] + q >= LINF) return false;
+            stock[m] += q;
+        }
+        for (auto [m, q] : reaction.prod) {
+            contribution[m][plan.seq[i]] += q;
+            double worth = v0[m] < DINF / 2 ? v0[m] : 0;
+            trace.events.push_back({i, m, false, max(0.001, worth * q)});
+        }
+    }
+    if (trace.cost.back() != plan.cost || trace.stock.back()[target] < quantity)
+        return false;
+    trace.required[n][target] = quantity;
+    for (int i = n - 1; i >= 0; --i) {
+        trace.required[i] = trace.required[i + 1];
+        for (auto [m, q] : R[plan.seq[i]].out)
+            trace.required[i][m] = max(0LL, trace.required[i][m] - q);
+        for (auto [m, q] : R[plan.seq[i]].in) {
+            if ((__int128)trace.required[i][m] + q >= LINF) return false;
+            trace.required[i][m] += q;
+        }
+    }
+    trace.policy = plan.choice.size() == (size_t)M ? plan.choice : baseChoice;
+    for (int m = 0; m < M; ++m) {
+        ll most = bought[m];
+        int source = price[m] >= 0 ? CH_BUY : trace.policy[m];
+        for (auto [r, q] : contribution[m]) {
+            if (q > most || (q == most && r < source)) { most = q; source = r; }
+        }
+        if (most) trace.policy[m] = source;
+    }
+    stable_sort(trace.events.begin(), trace.events.end(), [](const Event& a, const Event& b) {
+        if (a.purchase != b.purchase) return a.purchase > b.purchase;
+        if (a.weight != b.weight) return a.weight > b.weight;
+        return a.position < b.position;
+    });
+    return true;
+}
+
+static bool accept(Plan& best, vector<int> candidate, int target, ll quantity) {
+    ll cost = 0;
+    if (!verifySeq(candidate, target, quantity, cost) || cost >= best.cost) return false;
+    // A changed downstream recipe can make an entire old precursor branch dead.
+    auto live = factory_sequence_polish::liveSequence(candidate, target, quantity);
+    ll liveCost = 0;
+    if (live.size() < candidate.size() && verifySeq(live, target, quantity, liveCost)
+            && liveCost < cost) {
+        candidate = move(live);
+        cost = liveCost;
+    }
+    best.cost = cost;
+    best.seq = move(candidate);
+    best.proven = false;
+    best.dem.clear();
+    vector<unsigned char> used(M);
+    used[target] = 1;
+    for (int r : best.seq) for (auto [m, q] : R[r].in) used[m] = 1;
+    for (int m = 0; m < M; ++m) if (used[m]) best.dem.push_back(m);
+    return true;
+}
+
+static bool replaySuffix(adaptive_detail::Planner& planner, const Plan& plan,
+                         const Trace& trace, int begin, int target, ll quantity) {
+    if (planner.stock[target] >= quantity) return true;
+    for (int i = begin; i < (int)plan.seq.size(); ++i) {
+        if (planner.expired()) return false;
+        int r = plan.seq[i];
+        // Exact sufficient test for redundancy in the unchanged suffix. The
+        // reverse requirements include gross catalyst requirements as well.
+        bool useful = false;
+        for (auto [m, q] : R[r].prod)
+            if (planner.stock[m] < trace.required[i + 1][m]) useful = true;
+        if (!useful) continue;
+        bool ready = false;
+        for (int guard = 0; guard < 16; ++guard) {
+            ready = true;
+            for (auto [m, q] : R[r].in) {
+                if (price[m] >= 0 || planner.stock[m] >= q) continue;
+                ready = false;
+                if (!planner.ensure(m, q, q, false)) return false;
+            }
+            if (ready) break;
+        }
+        if (!ready || !planner.fire(r)) return false;
+        if (planner.stock[target] >= quantity) return true;
+    }
+    return planner.stock[target] >= quantity;
+}
+
+}  // namespace factory_trajectory
+
+static void trajectoryImprove(Plan& best, int target, ll quantity, double deadline) {
+    if (best.cost <= 0 || best.cost >= LINF || best.seq.empty() || nowSec() >= deadline)
+        return;
+    using namespace factory_trajectory;
+    uint64_t seed = 0x6a09e667f3bcc909ULL ^ ((uint64_t)searchSeed << 23)
+                  ^ (uint64_t)target * 998244353ULL ^ (uint64_t)quantity;
+    adaptive_detail::Planner prepared(best, deadline, seed);
+    mt19937 rng((unsigned)(seed ^ (seed >> 32)));
+    Trace trace;
+    bool dirty = true;
+    size_t trial = 0, eventCursor = 0;
+    while (nowSec() < deadline) {
+        if (dirty) {
+            if (!makeTrace(best, target, quantity, trace, deadline)) return;
+            trace.events.erase(remove_if(trace.events.begin(), trace.events.end(), [&](const Event& event) {
+                if (!event.purchase && price[event.molecule] >= 0) return false;
+                for (int r : prepared.source[event.molecule])
+                    if (event.purchase || r != best.seq[event.position]) return false;
+                return true;
+            }), trace.events.end());
+            eventCursor = 0;
+            dirty = false;
+        }
+        ++trial;
+        const int n = (int)best.seq.size();
+        int checkpoint = 0;
+        Event event{0, target, false, 0};
+        bool targeted = !trace.events.empty() && trial % 3 != 0;
+        if (targeted) {
+            // Start systematically with the most expensive purchases. A later
+            // randomized pass also explores production choices in the tail.
+            size_t index = eventCursor++;
+            if (index >= trace.events.size()) index = rng() % trace.events.size();
+            event = trace.events[index];
+            checkpoint = event.position;
+        } else if (trial <= 12) {
+            checkpoint = (int)((trial % 5) * (size_t)n / 5);
+        } else {
+            checkpoint = rng() % n;
+        }
+        if (trace.cost[checkpoint] >= best.cost) continue;
+        adaptive_detail::Planner planner = prepared;
+        planner.bound = best.cost;
+        planner.cost = trace.cost[checkpoint];
+        planner.stock = trace.stock[checkpoint];
+        planner.sequence.assign(best.seq.begin(), best.seq.begin() + checkpoint);
+        planner.cap = min<ll>(500000, max<ll>(10000, best.seq.size() * 4 + 500));
+        planner.deadline = min(deadline, nowSec() + min(0.12, 0.012 + 0.000015 * (n - checkpoint)));
+        planner.randomState = seed + trial * 11995408973635179863ULL;
+        planner.preferred = trial % 4 == 0 && best.choice.size() == (size_t)M
+                          ? best.choice : trace.policy;
+        planner.preference = trial % 7 == 0 ? 0.6 : 0.005 + 0.04 * planner.uniform();
+        planner.noise = trial < 8 ? 0 : 0.05 + 0.25 * planner.uniform();
+        planner.credit = (trial % 5) * 0.25;
+        planner.ordering = trial < 8 ? 3 : planner.random32() % 4;
+        planner.protectAncestors = trial % 5 != 0;
+        bool solved = false;
+        if (targeted) {
+            int m = event.molecule;
+            vector<int> sources = planner.source[m];
+            int old = best.seq[checkpoint];
+            if (!event.purchase)
+                sources.erase(remove(sources.begin(), sources.end(), old), sources.end());
+            if (!event.purchase && price[m] >= 0) sources.push_back(CH_BUY);
+            if (!sources.empty()) {
+                int alternative = sources[(trial / 2) % sources.size()];
+                if (alternative == CH_BUY) {
+                    // Omit this production batch and buy only the eventual
+                    // remainder at its consuming reactions.
+                    solved = replaySuffix(planner, best, trace, checkpoint + 1, target, quantity);
+                } else {
+                planner.source[m] = {alternative};
+                planner.preferred[m] = alternative;
+                ll increase = event.purchase
+                    ? max(1LL, qtyOf(R[old].in, m) - planner.stock[m])
+                    : max(1LL, min(qtyOf(R[old].prod, m),
+                                   max(0LL, trace.required[checkpoint + 1][m] - planner.stock[m])));
+                if ((__int128)planner.stock[m] + increase < LINF) {
+                    ll need = planner.stock[m] + increase;
+                    if (planner.ensure(m, need, need, true) == 1) {
+                        int begin = checkpoint + (event.purchase ? 0 : 1);
+                        solved = replaySuffix(planner, best, trace, begin, target, quantity);
+                    }
+                }
+                }
+            }
+        } else {
+            if (trial > 8 && planner.uniform() < 0.7) {
+                int changes = 1 + rng() % 3;
+                for (int j = 0; j < changes && !best.dem.empty(); ++j) {
+                    int m = best.dem[rng() % best.dem.size()];
+                    if (!planner.source[m].empty())
+                        planner.preferred[m] = planner.source[m][rng() % planner.source[m].size()];
+                }
+            }
+            solved = planner.ensure(target, quantity, quantity, true) == 1;
+        }
+        if (solved && !planner.stopped && planner.cost < best.cost &&
+                accept(best, move(planner.sequence), target, quantity)) dirty = true;
+        if (best.cost == 0) return;
+    }
+}
+
+#endif  // FACTORY_TRAJECTORY_SEARCH_HPP
+
+// ---- family_search.hpp ----
+#ifndef FACTORY_FAMILY_SEARCH_HPP
+#define FACTORY_FAMILY_SEARCH_HPP
+
+// Share valid production prefixes and repeatable batches between independent
+// cases. Cases still start empty: inventory is never transferred between them.
+namespace factory_family {
+struct Block { vector<int> seq; ll yield, cost; };
+struct State {
+    vector<ll> stock;
+    ll cost;
+    int parent, block, length;
+    bool active = true;
+};
+
+static bool step(int r, vector<ll>& stock, ll& cost, ll bound) {
+    __int128 next = cost;
+    for (auto e : R[r].in) {
+        ll missing = max(0LL, e.second - stock[e.first]);
+        if (missing && price[e.first] < 0) return false;
+        if (missing) next += (__int128)missing * price[e.first];
+    }
+    if (next >= bound || next >= LINF) return false;
+    for (auto e : R[r].in) stock[e.first] = max(0LL, stock[e.first] - e.second);
+    for (auto e : R[r].out) {
+        if ((__int128)stock[e.first] + e.second >= LINF) return false;
+        stock[e.first] += e.second;
+    }
+    cost = (ll)next;
+    return true;
+}
+
+static vector<Block> blocksFor(const vector<Plan>& bank, int target, ll K, double deadline) {
+    map<ll, vector<Block>> byYield;
+    for (const Plan& plan : bank) {
+        if (nowSec() >= deadline) break;
+        if (plan.cost >= LINF) continue;
+        vector<ll> stock(M, 0);
+        ll cost = 0, largest = 0;
+        for (int i = 0; i < (int)plan.seq.size(); ++i) {
+            if ((i & 127) == 0 && nowSec() >= deadline) break;
+            if (!step(plan.seq[i], stock, cost, LINF)) break;
+            if (stock[target] <= largest) continue;
+            largest = stock[target];
+            Block block{vector<int>(plan.seq.begin(), plan.seq.begin() + i + 1), largest, cost};
+            auto& pool = byYield[largest];
+            bool duplicate = false;
+            for (const auto& old : pool) if (old.seq == block.seq) duplicate = true;
+            if (!duplicate) pool.push_back(move(block));
+            stable_sort(pool.begin(), pool.end(), [](const Block& a, const Block& b) {
+                if (a.cost != b.cost) return a.cost < b.cost;
+                return a.seq.size() < b.seq.size();
+            });
+            if (pool.size() > 6) pool.resize(6);
+            if (largest >= K) break;
+        }
+    }
+    vector<Block> blocks;
+    for (auto& entry : byYield) for (auto& block : entry.second) blocks.push_back(move(block));
+    return blocks;
+}
+
+static void improve(Plan& best, const vector<Plan>& bank, int target, ll K, double deadline) {
+    if (best.cost <= 0 || best.cost >= LINF || nowSec() >= deadline) return;
+    auto blocks = blocksFor(bank, target, K, deadline);
+    if (blocks.empty()) return;
+    vector<State> states;
+    states.push_back({vector<ll>(M, 0), 0, -1, -1, 0, true});
+    using Entry = pair<ll, int>;
+    priority_queue<Entry, vector<Entry>, greater<Entry>> queue;
+    queue.push({0, 0});
+    map<ll, vector<int>> labels;
+    labels[0].push_back(0);
+    const int maxStates = max(300, min(12000, 1600000 / max(1, M)));
+    while (!queue.empty() && (int)states.size() < maxStates && nowSec() < deadline) {
+        auto [queuedCost, index] = queue.top(); queue.pop();
+        if (!states[index].active || queuedCost != states[index].cost || queuedCost >= best.cost) continue;
+        // Own copies survive vector growth while new states are appended.
+        const vector<ll> startStock = states[index].stock;
+        for (int b = 0; b < (int)blocks.size() && nowSec() < deadline; ++b) {
+            vector<ll> stock = startStock;
+            ll cost = queuedCost;
+            int length = 0;
+            bool valid = true;
+            for (int r : blocks[b].seq) {
+                if ((length & 127) == 0 && nowSec() >= deadline) { valid = false; break; }
+                if (!step(r, stock, cost, best.cost)) { valid = false; break; }
+                ++length;
+                if (stock[target] >= K) break;
+            }
+            if (!valid || stock[target] <= startStock[target]) continue;
+            if (stock[target] >= K) {
+                vector<pair<int, int>> path{{b, length}};
+                for (int p = index; states[p].parent >= 0; p = states[p].parent)
+                    path.push_back({states[p].block, states[p].length});
+                reverse(path.begin(), path.end());
+                vector<int> sequence;
+                for (auto entry : path)
+                    sequence.insert(sequence.end(), blocks[entry.first].seq.begin(),
+                                    blocks[entry.first].seq.begin() + entry.second);
+                ll checked;
+                if (verifySeq(sequence, target, K, checked) && checked == cost && cost < best.cost) {
+                    best.seq = move(sequence); best.cost = cost; best.proven = false;
+                }
+                continue;
+            }
+            auto& peers = labels[stock[target]];
+            bool dominated = false;
+            for (int p : peers) if (states[p].active && states[p].cost <= cost) {
+                bool covers = true;
+                for (int m = 0; m < M && covers; ++m) covers = states[p].stock[m] >= stock[m];
+                if (covers) { dominated = true; break; }
+            }
+            if (dominated) continue;
+            // Bounded labels are a heuristic only. Stock itself is never clipped.
+            if (peers.size() >= 40) {
+                auto worst = max_element(peers.begin(), peers.end(), [&](int a, int c) {
+                    return states[a].cost < states[c].cost;
+                });
+                if (states[*worst].cost <= cost) continue;
+                states[*worst].active = false;
+                peers.erase(worst);
+            }
+            int next = (int)states.size();
+            states.push_back({move(stock), cost, index, b, length, true});
+            peers.push_back(next); queue.push({cost, next});
+            if ((int)states.size() >= maxStates) break;
+        }
+    }
+}
+} // namespace factory_family
+
+static void improveCaseFamilies(vector<Plan>& plans, const vector<pair<ll, int>>& cases,
+                                const vector<Plan>& previous, double deadline) {
+    vector<Plan> bank = previous;
+    bank.insert(bank.end(), plans.begin(), plans.end());
+    for (int pass = 0; pass < 2 && nowSec() < deadline; ++pass) {
+        bool improved = false;
+        for (int i = 0; i < (int)cases.size() && nowSec() < deadline; ++i) {
+            ll old = plans[i].cost;
+            double slice = max(0.002, (deadline - nowSec()) / max(1, (int)cases.size() - i));
+            factory_family::improve(plans[i], bank, cases[i].second, cases[i].first,
+                                    min(deadline, nowSec() + slice));
+            if (plans[i].cost < old) { bank.push_back(plans[i]); improved = true; }
+        }
+        if (!improved) break;
+    }
+}
+
+#endif
+
 
 static chrono::steady_clock::time_point clockLimit(double deadline) {
     return T0 + chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(deadline));
@@ -1484,7 +1886,7 @@ static void scheduleCounts(const vector<ll>& counts, const vector<ll>& budget,
     fill(inProg.begin(), inProg.end(), 0);
     fill(dem.begin(), dem.end(), 0);
     seqBuf.clear();
-    chPtr = &ch;
+    ChoiceScope choices(ch);
     curCost = 0; costBound = best.cost; stepCnt = 0;
     stepCap = max<ll>(20000, count * 6); aborted = false;
     trialDeadline = deadline;
@@ -1595,10 +1997,338 @@ static void linearImprove(Plan& best, int target, ll K, double deadline) {
 
 static vector<vector<int>> policyBank;
 
+// ---- integer_search.hpp ----
+#ifndef FACTORY_INTEGER_SEARCH_HPP
+#define FACTORY_INTEGER_SEARCH_HPP
+
+// Included after optimization.hpp's scheduling helpers. Linear models guide
+// the search only; every accepted sequence is replayed independently.
+namespace factory_integer_detail {
+
+static vector<vector<ll>> conservedAtoms() {
+    vector<map<string, ll>> formulas(M);
+    set<string> elements;
+    for (int m = 0; m < M; ++m) {
+        const string& name = names[m];
+        for (size_t i = 0; i < name.size();) {
+            if (!isupper((unsigned char)name[i])) return {};
+            string e(1, name[i++]);
+            while (i < name.size() && islower((unsigned char)name[i])) e += name[i++];
+            ll q = 0;
+            while (i < name.size() && isdigit((unsigned char)name[i])) {
+                if (q > 100000000) return {};
+                q = q * 10 + name[i++] - '0';
+            }
+            if (q == 0) q = 1;
+            formulas[m][e] += q;
+            elements.insert(e);
+        }
+    }
+    vector<vector<ll>> result;
+    for (const string& element : elements) {
+        vector<ll> atom(M);
+        for (int m = 0; m < M; ++m) {
+            auto it = formulas[m].find(element);
+            if (it != formulas[m].end()) atom[m] = it->second;
+        }
+        bool conserved = true;
+        for (const auto& reaction : R) {
+            __int128 balance = 0;
+            for (auto [m, q] : reaction.out) balance += (__int128)atom[m] * q;
+            for (auto [m, q] : reaction.in) balance -= (__int128)atom[m] * q;
+            if (balance != 0) { conserved = false; break; }
+        }
+        if (conserved) result.push_back(move(atom));
+    }
+    return result;
+}
+
+struct CountScheduler {
+    vector<ll> inventory, left;
+    vector<int> sequence, guide, cursor;
+    vector<vector<int>> positions;
+    vector<unsigned char> active;
+    vector<double> priority;
+    ll cap;
+    double deadline;
+    bool failed = false;
+    int calls = 0;
+
+    CountScheduler(const vector<ll>& counts, const vector<ll>& budget,
+                   const Plan& incumbent, const vector<ll>& initialStock,
+                   const vector<int>& prefix, double until, unsigned seed)
+        : inventory(budget), left(counts), guide(M, CH_NONE), cursor(R.size(), 0),
+          positions(R.size()), active(M, 0), priority(R.size()), deadline(until) {
+        cap = min<ll>(100000, max<ll>(10000, incumbent.seq.size() * 8 + 1000));
+        sequence = prefix;
+        for (int m = 0; m < M; ++m) {
+            __int128 total = (__int128)inventory[m] + initialStock[m];
+            if (total >= LINF) { failed = true; break; }
+            inventory[m] = (ll)total;
+        }
+        for (int m = 0; m < M; ++m) if (price[m] >= 0) guide[m] = CH_BUY;
+        for (int i = 0; i < (int)incumbent.seq.size(); ++i) {
+            int r = incumbent.seq[i];
+            positions[r].push_back(i);
+            for (auto [m, q] : R[r].prod) if (guide[m] == CH_NONE) guide[m] = r;
+        }
+        for (int m = 0; m < M; ++m) if (guide[m] == CH_NONE) guide[m] = baseChoice[m];
+        mt19937 gen(seed);
+        for (int r : prefix) if (cursor[r] < (int)positions[r].size()) ++cursor[r];
+        for (double& value : priority) value = (gen() % 1000000) * 1e-6;
+    }
+
+    bool expired() {
+        if (failed) return true;
+        if (++calls > cap * 30 || (calls % 32 == 0 && nowSec() >= deadline)) failed = true;
+        return failed;
+    }
+
+    bool ready(int r) const {
+        for (auto [m, q] : R[r].in) if (inventory[m] < q) return false;
+        return true;
+    }
+
+    bool execute(int r) {
+        if (expired() || (ll)sequence.size() >= cap || !ready(r)) return false;
+        for (auto [m, q] : R[r].in) inventory[m] -= q;
+        for (auto [m, q] : R[r].out) {
+            if ((__int128)inventory[m] + q >= LINF) return false;
+            inventory[m] += q;
+        }
+        sequence.push_back(r);
+        if (left[r] > 0) --left[r];
+        if (cursor[r] < (int)positions[r].size()) ++cursor[r];
+        return true;
+    }
+
+    int nextPosition(int r) const {
+        return cursor[r] < (int)positions[r].size()
+            ? positions[r][cursor[r]] : 1000000000 + r;
+    }
+
+    bool ensure(int m, ll quantity, int depth = 0) {
+        if (inventory[m] >= quantity) return true;
+        if (expired() || depth > M + 2) return false;
+        if (price[m] >= 0) { inventory[m] = quantity; return true; }
+        if (active[m] || guide[m] < 0) return false;
+        active[m] = 1;
+        int r = guide[m];
+        bool ok = true;
+        while (inventory[m] < quantity && ok) {
+            ll before = inventory[m];
+            // Producing one ingredient can consume a previously gathered one.
+            for (int retry = 0; retry < M + 8 && !ready(r); ++retry) {
+                for (auto [a, q] : R[r].in) {
+                    if (!ensure(a, q, depth + 1)) { ok = false; break; }
+                }
+                if (!ok || expired()) { ok = false; break; }
+            }
+            if (!ok || !execute(r) || inventory[m] <= before) { ok = false; break; }
+        }
+        active[m] = 0;
+        return ok && inventory[m] >= quantity;
+    }
+
+    bool run(int target, ll quantity, int mode) {
+        for (ll iteration = 0; iteration < cap && !expired(); ++iteration) {
+            if (inventory[target] >= quantity) return true;
+            int pick = -1, blocked = -1;
+            double score = -1e300;
+            vector<ll> demand(M);
+            if (mode == 2) for (int r = 0; r < (int)R.size(); ++r) if (left[r])
+                for (auto [m, q] : R[r].in) {
+                    __int128 next = (__int128)demand[m] + (__int128)q * left[r];
+                    demand[m] = (ll)min<__int128>(LINF / 2, next);
+                }
+            for (int r = 0; r < (int)R.size(); ++r) if (left[r] > 0) {
+                if (blocked < 0 || nextPosition(r) < nextPosition(blocked)) blocked = r;
+                if (!ready(r)) continue;
+                double value = -nextPosition(r);
+                if (mode == 1) value = priority[r] * 10000;
+                if (mode == 2) {
+                    value = 0;
+                    for (auto [m, q] : R[r].out)
+                        value += min(q, max(0LL, demand[m] - inventory[m])) * max(0.01, wgt(m));
+                }
+                if (pick < 0 || value > score) { pick = r; score = value; }
+            }
+            if (pick >= 0) {
+                if (!execute(pick)) return false;
+            } else {
+                if (blocked < 0) return ensure(target, quantity);
+                int ingredient = -1;
+                double cheapest = DINF;
+                for (auto [m, q] : R[blocked].in) if (inventory[m] < q) {
+                    double value = (q - inventory[m]) * max(0.01, wgt(m));
+                    if (ingredient < 0 || value < cheapest) { ingredient = m; cheapest = value; }
+                }
+                if (ingredient < 0 || !ensure(ingredient, qtyOf(R[blocked].in, ingredient))) return false;
+            }
+        }
+        return false;
+    }
+};
+
+static void tryCounts(const vector<double>& x, const vector<int>& buy, Plan& best,
+                      int target, ll quantity, const vector<ll>& initialStock,
+                      const vector<int>& prefix, double deadline, unsigned seed) {
+    const int nr = R.size();
+    vector<ll> counts(nr), budget(M);
+    ll total = 0;
+    for (int r = 0; r < nr; ++r) {
+        if (!isfinite(x[r]) || x[r] > 1000000) return;
+        counts[r] = max(0LL, (ll)ceil(x[r] - 1e-7));
+        total += counts[r];
+    }
+    if (total <= 0 || total > max<ll>(10000, best.seq.size() * 10)) return;
+    for (int j = 0; j < (int)buy.size(); ++j) {
+        double amount = x[nr + j];
+        if (!isfinite(amount) || amount > 1e12) return;
+        budget[buy[j]] = max(0LL, (ll)ceil(amount - 1e-7));
+    }
+    for (int mode = 0; mode < 3 && nowSec() < deadline; ++mode) {
+        CountScheduler scheduler(counts, budget, best, initialStock, prefix, deadline, seed + mode * 17389u);
+        if (!scheduler.run(target, quantity, mode)) continue;
+        ll actual;
+        if (verifySeq(scheduler.sequence, target, quantity, actual) && actual < best.cost)
+            considerSequence(best, scheduler.sequence, target, quantity,
+                             best.choice.empty() ? baseChoice : best.choice);
+    }
+}
+
+} // namespace factory_integer_detail
+
+static void integerImprove(Plan& best, int target, ll K, double deadline) {
+    using namespace factory_integer_detail;
+    if (best.cost >= LINF || best.cost <= 0 || nowSec() >= deadline) return;
+    const int nr = R.size();
+    vector<int> buy;
+    for (int m = 0; m < M; ++m) if (price[m] >= 0) buy.push_back(m);
+    const int nv = nr + buy.size();
+    vector<vector<double>> basic(M, vector<double>(nv));
+    vector<double> rhs(M), objective(nv);
+    rhs[target] = -(double)K;
+    for (int r = 0; r < nr; ++r) {
+        for (auto [m, q] : R[r].in) basic[m][r] += q;
+        for (auto [m, q] : R[r].out) basic[m][r] -= q;
+    }
+    for (int j = 0; j < (int)buy.size(); ++j) {
+        basic[buy[j]][nr + j] = -1;
+        objective[nr + j] = -(double)price[buy[j]];
+    }
+    const auto atoms = conservedAtoms();
+    mt19937 rng(searchSeed ^ (unsigned)target * 9781u ^ (unsigned)K * 1723u);
+    // Retained prefixes provide real catalyst stock and support correlated
+    // recipe substitutions in the remainder without paying startup twice.
+    const vector<int> original = best.seq;
+    vector<int> cuts = {(int)original.size() / 4, (int)original.size() / 2,
+                        0, (int)original.size() * 3 / 4,
+                        (int)original.size() / 8, (int)original.size() * 5 / 8};
+    for (int neighborhood = 0; neighborhood < (int)cuts.size() && nowSec() < deadline; ++neighborhood) {
+        const int cut = cuts[neighborhood];
+        const double localDeadline = min(deadline, nowSec() +
+            (deadline - nowSec()) / max(1, (int)cuts.size() - neighborhood));
+        vector<int> prefix(original.begin(), original.begin() + cut);
+        vector<ll> stock(M), incumbentCounts(nr);
+        ll spent = 0;
+        bool valid = true;
+        for (int r : prefix) {
+            for (auto [m, q] : R[r].in) {
+                ll shortage = max(0LL, q - stock[m]);
+                if (shortage && price[m] < 0) { valid = false; break; }
+                __int128 nextCost = (__int128)spent + (__int128)shortage * max(0LL, price[m]);
+                if (nextCost >= best.cost) { valid = false; break; }
+                spent = (ll)nextCost;
+                stock[m] = max(0LL, stock[m] - q);
+            }
+            if (!valid) break;
+            for (auto [m, q] : R[r].out) {
+                if ((__int128)stock[m] + q >= LINF) { valid = false; break; }
+                stock[m] += q;
+            }
+            if (!valid) break;
+        }
+        if (!valid) continue;
+        if (stock[target] >= K) {
+            considerSequence(best, prefix, target, K, best.choice);
+            continue;
+        }
+        for (int i = cut; i < (int)original.size(); ++i) ++incumbentCounts[original[i]];
+        auto matrix = basic;
+        auto b = rhs;
+        for (int m = 0; m < M; ++m) b[m] += stock[m];
+        // Restrict to the incumbent support initially. Other neighborhoods
+        // introduce alternate reactions while bounding search resources.
+        for (int r = 0; r < nr; ++r) {
+            bool allowed = incumbentCounts[r] > 0 || neighborhood == 5;
+            if (neighborhood == 1 && !allowed) allowed = rng() % 4 == 0;
+            if (neighborhood == 3 && !allowed) allowed = rng() % 2 == 0;
+            if (neighborhood == 4 && !allowed) allowed = rng() % 3 == 0;
+            vector<double> row(nv); row[r] = 1;
+            matrix.push_back(move(row));
+            b.push_back(allowed ? max<ll>(12, incumbentCounts[r] * 2 + 6) : 0);
+        }
+        // Conserved-atom stock cuts bound seed needs for the incumbent
+        // neighborhood, with already-purchased atoms credited exactly.
+        if (neighborhood == 0 || neighborhood == 2) for (const auto& atom : atoms) {
+            ll required = 0;
+            for (int r = 0; r < nr; ++r) if (incumbentCounts[r]) {
+                __int128 need = 0;
+                for (auto [m, q] : R[r].in) need += (__int128)q * atom[m];
+                if (need >= LINF) { required = 0; break; }
+                required = max(required, (ll)need);
+            }
+            __int128 available = 0;
+            for (int m = 0; m < M; ++m) available += (__int128)atom[m] * stock[m];
+            if (available >= required || required <= 0) continue;
+            vector<double> row(nv);
+            for (int j = 0; j < (int)buy.size(); ++j) row[nr + j] = -(double)atom[buy[j]];
+            matrix.push_back(move(row)); b.push_back(-(double)(required - available));
+        }
+        struct Branch { int variable; double bound; bool lower; };
+        vector<vector<Branch>> stack(1);
+        int nodes = 0;
+        while (!stack.empty() && ++nodes <= 18 && nowSec() < localDeadline) {
+            auto branches = move(stack.back()); stack.pop_back();
+            auto a = matrix; auto bb = b;
+            for (const auto& branch : branches) {
+                vector<double> row(nv);
+                row[branch.variable] = branch.lower ? -1 : 1;
+                a.push_back(move(row)); bb.push_back(branch.lower ? -branch.bound : branch.bound);
+            }
+            auto lp = factory_lp::solveLP(a, bb, objective, clockLimit(localDeadline));
+            if (lp.status != factory_lp::LPStatus::Optimal) continue;
+            if (-lp.objective + spent >= best.cost - 1e-7) continue;
+            tryCounts(lp.x, buy, best, target, K, stock, prefix, localDeadline, rng());
+            int fractional = -1;
+            double fractionality = 0;
+            for (int r = 0; r < nr; ++r) {
+                double f = lp.x[r] - floor(lp.x[r]);
+                double score = min(f, 1 - f);
+                if (score > fractionality + 1e-6) { fractionality = score; fractional = r; }
+            }
+            if (fractional < 0) continue;
+            auto down = branches, up = branches;
+            down.push_back({fractional, floor(lp.x[fractional]), false});
+            up.push_back({fractional, ceil(lp.x[fractional]), true});
+            // Explore the direction nearer the incumbent first.
+            if (incumbentCounts[fractional] > lp.x[fractional]) {
+                stack.push_back(move(down)); stack.push_back(move(up));
+            } else {
+                stack.push_back(move(up)); stack.push_back(move(down));
+            }
+        }
+    }
+}
+
+#endif
+
+
 static Plan solveBetter(ll K, int target, double deadline, const Plan& previous) {
     const double start = nowSec();
     const double available = max(0.001, deadline - start);
-    trialDeadline = start + available * 0.30;
+    trialDeadline = start + available * 0.12;
     Plan best = solveCase(K, target, trialDeadline);
     if (previous.cost < best.cost) {
         vector<int> choice = best.choice.empty() ? baseChoice : best.choice;
@@ -1616,7 +2346,7 @@ static Plan solveBetter(ll K, int target, double deadline, const Plan& previous)
         best.proven = result.exhausted && best.cost < LINF;
         return best;
     }
-    trialDeadline = start + available * 0.40;
+    trialDeadline = start + available * 0.20;
     for (const auto& policy : policyBank) {
         if (nowSec() >= trialDeadline) break;
         ll cost = runTrial(policy, target, K, best.cost, CAP0);
@@ -1626,12 +2356,14 @@ static Plan solveBetter(ll K, int target, double deadline, const Plan& previous)
         mt19937 rng(392473u + target);
         descend(best, target, K, trialDeadline, rng);
     }
-    if (nowSec() < start + available * 0.52)
-        best = adaptiveSolve(K, target, best, start + available * 0.52);
-    if (best.cost < LINF && nowSec() < start + available * 0.75)
-        linearImprove(best, target, K, start + available * 0.75);
-    if (nowSec() < start + available * 0.88)
-        best = adaptiveSolve(K, target, best, start + available * 0.88);
+    if (nowSec() < start + available * 0.28)
+        best = adaptiveSolve(K, target, best, start + available * 0.28);
+    if (best.cost < LINF && nowSec() < start + available * 0.34)
+        linearImprove(best, target, K, start + available * 0.34);
+    if (best.cost < LINF && nowSec() < start + available * 0.56)
+        integerImprove(best, target, K, start + available * 0.56);
+    if (best.cost < LINF && nowSec() < start + available * 0.90)
+        trajectoryImprove(best, target, K, start + available * 0.90);
     if (best.cost < LINF && nowSec() < deadline)
         polishSequence(best, target, K, deadline);
     if (best.cost < LINF) trimSequence(best, target, K);
@@ -1766,9 +2498,11 @@ int main(int argc, char** argv) {
             }
         }
     }
-    ll total = 0;
+    // Reserve time to reuse complete valid production batches across targets.
+    // Each candidate is replayed from empty; cases never share inventory.
+    const double individualDeadline = max(nowSec(), totalTime * 0.90);
     for (int i = 0; i < nCases; ++i) {
-        double remaining = totalTime - nowSec();
+        double remaining = individualDeadline - nowSec();
         double share = max(0.2, remaining / (double)(nCases - i));
         plans[i] = solveBetter(cases[i].first, cases[i].second, nowSec() + share, previous[i]);
         if (plans[i].cost >= LINF) {
@@ -1776,6 +2510,11 @@ int main(int argc, char** argv) {
                  << names[cases[i].second] << ")\n";
             return 2;
         }
+        cerr << "Search case " << i + 1 << "/" << nCases << ": cost " << plans[i].cost << "\n";
+    }
+    improveCaseFamilies(plans, cases, previous, max(nowSec(), totalTime));
+    ll total = 0;
+    for (int i = 0; i < nCases; ++i) {
         ll vc = 0;
         bool ok = verifySeq(plans[i].seq, cases[i].second, cases[i].first, vc);
         if (!ok || vc != plans[i].cost) {

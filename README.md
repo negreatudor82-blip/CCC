@@ -32,8 +32,10 @@ and leaves the existing output untouched.
 
 The optimizer retains the original recipe search and adds recipe selection by
 quantity and inventory, mixed production and purchases, catalyst/seed handling,
-linear relaxations, reuse of successful policies, and reaction-sequence
-reordering and deletion. Small networks also use exact inventory search. Only
+integer reaction-count neighborhoods, and replacement of a sequence's remainder
+from its actual intermediate inventory. It also reuses valid production batches
+across cases, reorders reactions and removes redundant production. Each case
+still starts with an empty inventory. Small networks use exact inventory search. Only
 an exhausted exact search is labelled `optimal`; larger searches report
 `best found`. More runtime can improve a result but does not prove a global
 minimum.
@@ -54,3 +56,40 @@ python3 optimizer/test_optimizer.py ./factory --random-cases 30
 ```
 
 See [RESULTS.md](RESULTS.md) for verified costs and their limitations.
+
+The independent release checks also replay every saved solution, reject any
+per-case cost regression, and verify rational lower-bound certificates with
+exact arithmetic:
+
+```sh
+python3 optimizer/validate_solutions.py --metadata solutions/validation.json
+python3 optimizer/verify_bounds.py
+```
+
+Lower bounds measure what further savings might remain possible; they do not
+mean that the saved outputs achieve the global minimum. Certificate verification
+uses only Python's standard library. Regenerating the certificates with
+`optimizer/compute_bounds.py` additionally needs SciPy.
+
+An optional offline refinement helper explores additional integer-planning
+neighborhoods from intermediate inventories. It needs NumPy and SciPy; these
+packages are not required by the C++ executable. Like the C++ program, it retains
+each existing case unless full inventory replay finds a cheaper valid sequence:
+
+```sh
+python3 optimizer/refine_with_milp.py inputs/in_level-3_4-enormous.txt \
+    solutions/out_level-3_4-enormous.txt refined-enormous.txt \
+    --seconds-per-solve 5 --rounds 3 --restricted-only \
+    --fractions .8,.6,.4,.2,0
+```
+
+Inspect and independently validate candidate outputs before replacing published
+files. `optimizer/merge_solutions.py` can merge complete candidate directories,
+retaining the cheapest verified result separately for each target case.
+
+To rebuild the standalone C++ file after changing modular sources:
+
+```sh
+python3 optimizer/amalgamate.py
+python3 optimizer/amalgamate.py --check
+```

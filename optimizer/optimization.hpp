@@ -5,6 +5,8 @@
 // from an empty inventory before it can replace the incumbent.
 #include "adaptive_planner.hpp"
 #include "sequence_polish.hpp"
+#include "trajectory_search.hpp"
+#include "family_search.hpp"
 
 static chrono::steady_clock::time_point clockLimit(double deadline) {
     return T0 + chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(deadline));
@@ -55,7 +57,7 @@ static void scheduleCounts(const vector<ll>& counts, const vector<ll>& budget,
     fill(inProg.begin(), inProg.end(), 0);
     fill(dem.begin(), dem.end(), 0);
     seqBuf.clear();
-    chPtr = &ch;
+    ChoiceScope choices(ch);
     curCost = 0; costBound = best.cost; stepCnt = 0;
     stepCap = max<ll>(20000, count * 6); aborted = false;
     trialDeadline = deadline;
@@ -166,10 +168,12 @@ static void linearImprove(Plan& best, int target, ll K, double deadline) {
 
 static vector<vector<int>> policyBank;
 
+#include "integer_search.hpp"
+
 static Plan solveBetter(ll K, int target, double deadline, const Plan& previous) {
     const double start = nowSec();
     const double available = max(0.001, deadline - start);
-    trialDeadline = start + available * 0.30;
+    trialDeadline = start + available * 0.12;
     Plan best = solveCase(K, target, trialDeadline);
     if (previous.cost < best.cost) {
         vector<int> choice = best.choice.empty() ? baseChoice : best.choice;
@@ -187,7 +191,7 @@ static Plan solveBetter(ll K, int target, double deadline, const Plan& previous)
         best.proven = result.exhausted && best.cost < LINF;
         return best;
     }
-    trialDeadline = start + available * 0.40;
+    trialDeadline = start + available * 0.20;
     for (const auto& policy : policyBank) {
         if (nowSec() >= trialDeadline) break;
         ll cost = runTrial(policy, target, K, best.cost, CAP0);
@@ -197,12 +201,14 @@ static Plan solveBetter(ll K, int target, double deadline, const Plan& previous)
         mt19937 rng(392473u + target);
         descend(best, target, K, trialDeadline, rng);
     }
-    if (nowSec() < start + available * 0.52)
-        best = adaptiveSolve(K, target, best, start + available * 0.52);
-    if (best.cost < LINF && nowSec() < start + available * 0.75)
-        linearImprove(best, target, K, start + available * 0.75);
-    if (nowSec() < start + available * 0.88)
-        best = adaptiveSolve(K, target, best, start + available * 0.88);
+    if (nowSec() < start + available * 0.28)
+        best = adaptiveSolve(K, target, best, start + available * 0.28);
+    if (best.cost < LINF && nowSec() < start + available * 0.34)
+        linearImprove(best, target, K, start + available * 0.34);
+    if (best.cost < LINF && nowSec() < start + available * 0.56)
+        integerImprove(best, target, K, start + available * 0.56);
+    if (best.cost < LINF && nowSec() < start + available * 0.90)
+        trajectoryImprove(best, target, K, start + available * 0.90);
     if (best.cost < LINF && nowSec() < deadline)
         polishSequence(best, target, K, deadline);
     if (best.cost < LINF) trimSequence(best, target, K);

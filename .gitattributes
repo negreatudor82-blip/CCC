@@ -1,0 +1,4 @@
+# Preserve exact input/output bytes for the SHA-256 audit certificates.
+/inputs/*.txt -text
+/solutions/*.txt -text
+/reference/* -text
