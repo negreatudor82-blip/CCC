@@ -27,8 +27,22 @@
     "input": "small",
     "cases": 10,
     "original_cost": 34038,
-    "improved_cost": 26684,
+    "improved_cost": 26660,
     "case_costs": [
+      2444,
+      2668,
+      3480,
+      3396,
+      3560,
+      2374,
+      2782,
+      1844,
+      2240,
+      1872
+    ],
+    "output": "out_level-3_1-small.txt",
+    "previous_cost": 26684,
+    "previous_case_costs": [
       2448,
       2668,
       3480,
@@ -40,21 +54,7 @@
       2248,
       1872
     ],
-    "output": "out_level-3_1-small.txt",
-    "previous_cost": 28576,
-    "previous_case_costs": [
-      2504,
-      2956,
-      3788,
-      3596,
-      3636,
-      2418,
-      3146,
-      2152,
-      2440,
-      1940
-    ],
-    "improved_cases": 10,
+    "improved_cases": 3,
     "certified_lower_bound": 20926,
     "case_lower_bounds": [
       1979,
@@ -69,14 +69,33 @@
       1484
     ],
     "input_sha256": "363be7d6f9b8493513fd6a088dfc1c42e92d2500cec18c5bfc80e4325896575f",
-    "output_sha256": "486970e38f3469e8104f23a3cfc30d5555e1362e7ee87332ea844031b0bf0ecc"
+    "output_sha256": "b16c304f140e0145ea9e8221ec82131d23d76693fc175f3ed3de7208d0879e9f"
   },
   {
     "input": "medium",
     "cases": 15,
     "original_cost": 26762,
-    "improved_cost": 21316,
+    "improved_cost": 21296,
     "case_costs": [
+      550,
+      1096,
+      1630,
+      1460,
+      1130,
+      852,
+      1608,
+      924,
+      1970,
+      1192,
+      1770,
+      2172,
+      2630,
+      1494,
+      818
+    ],
+    "output": "out_level-3_2-medium.txt",
+    "previous_cost": 21316,
+    "previous_case_costs": [
       550,
       1096,
       1630,
@@ -93,26 +112,7 @@
       1494,
       818
     ],
-    "output": "out_level-3_2-medium.txt",
-    "previous_cost": 22366,
-    "previous_case_costs": [
-      558,
-      1112,
-      1644,
-      1612,
-      1172,
-      856,
-      1732,
-      924,
-      2258,
-      1198,
-      1806,
-      2284,
-      2856,
-      1518,
-      836
-    ],
-    "improved_cases": 14,
+    "improved_cases": 2,
     "certified_lower_bound": 13837,
     "case_lower_bounds": [
       359,
@@ -132,14 +132,38 @@
       598
     ],
     "input_sha256": "9e053c22305d6019d2b64ad78c8720e4409c5a3f9972a39f33937a688a98ae80",
-    "output_sha256": "087eb22b60c45162697b097e76620ec528d72be21e638db8eedff7c443418037"
+    "output_sha256": "1992b3c518358e38efb938be8b21be352d5d7645ac2f7286983fdcb62119d63a"
   },
   {
     "input": "large",
     "cases": 20,
     "original_cost": 36529,
-    "improved_cost": 24970,
+    "improved_cost": 24949,
     "case_costs": [
+      1434,
+      844,
+      435,
+      889,
+      556,
+      2306,
+      2147,
+      1440,
+      1399,
+      749,
+      1915,
+      1034,
+      618,
+      1725,
+      1825,
+      1016,
+      570,
+      1336,
+      883,
+      1828
+    ],
+    "output": "out_level-3_3-large.txt",
+    "previous_cost": 24970,
+    "previous_case_costs": [
       1434,
       844,
       435,
@@ -161,31 +185,7 @@
       884,
       1828
     ],
-    "output": "out_level-3_3-large.txt",
-    "previous_cost": 27094,
-    "previous_case_costs": [
-      1559,
-      864,
-      437,
-      951,
-      560,
-      2356,
-      2243,
-      1973,
-      1455,
-      774,
-      2103,
-      1160,
-      642,
-      1857,
-      1882,
-      1279,
-      592,
-      1388,
-      952,
-      2067
-    ],
-    "improved_cases": 20,
+    "improved_cases": 5,
     "certified_lower_bound": 17550,
     "case_lower_bounds": [
       1226,
@@ -210,14 +210,38 @@
       1308
     ],
     "input_sha256": "b10f32dda8fed5ed8537d068f3e6e286501b9ab2f378a4998edb28814f668f3a",
-    "output_sha256": "1fefd79dbd50550dc3c36bd6d916fa82451c4040016de3bacba40437b0add124"
+    "output_sha256": "4cc054b58e96d2c86ab29c32336f8255f71d282581c413774199e0983ed09edd"
   },
   {
     "input": "enormous",
     "cases": 20,
     "original_cost": 40636,
-    "improved_cost": 31394,
+    "improved_cost": 31227,
     "case_costs": [
+      2212,
+      2106,
+      1718,
+      982,
+      2166,
+      2132,
+      804,
+      2311,
+      813,
+      538,
+      1624,
+      850,
+      3006,
+      2134,
+      1584,
+      1065,
+      622,
+      2234,
+      1161,
+      1165
+    ],
+    "output": "out_level-3_4-enormous.txt",
+    "previous_cost": 31394,
+    "previous_case_costs": [
       2212,
       2110,
       1718,
@@ -239,31 +263,7 @@
       1161,
       1165
     ],
-    "output": "out_level-3_4-enormous.txt",
-    "previous_cost": 34421,
-    "previous_case_costs": [
-      2555,
-      2384,
-      1842,
-      1246,
-      2438,
-      2173,
-      983,
-      2341,
-      879,
-      551,
-      1665,
-      879,
-      3270,
-      2422,
-      1632,
-      1078,
-      628,
-      2283,
-      1516,
-      1656
-    ],
-    "improved_cases": 20,
+    "improved_cases": 9,
     "certified_lower_bound": 19256,
     "case_lower_bounds": [
       1348,
@@ -288,6 +288,6 @@
       610
     ],
     "input_sha256": "2ce5527a38e9682687ccb38b7365b1893d0d5ee80247e75470d49dc2a106bb2f",
-    "output_sha256": "74a1dd8b88eb925044e7b535761bf9680b84859c0c5f1950f90a309cb4c150f5"
+    "output_sha256": "d5d00a2287454d171894c68ff96e569543052a5c82fd57b4548a02cd0ee61bee"
   }
 ]
